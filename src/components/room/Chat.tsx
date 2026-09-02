@@ -11,7 +11,6 @@ interface ChatMessage {
   user: string
   text: string
   timestamp: number
-  imageUrl?: string
 }
 
 export function Chat({
@@ -76,16 +75,26 @@ export function Chat({
     const fetchGifs = async () => {
       setIsSearchingGifs(true)
       try {
-        const apiKey = 'GlVGYHqc3SyCEGpoJCq1Gv25hVv61h26'
+        const apiKey = import.meta.env.VITE_GIPHY_API_KEY
+        if (!apiKey) {
+          setGifs([])
+          return
+        }
+
         const url = gifSearch.trim()
           ? `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(gifSearch)}&limit=12&rating=g`
           : `https://api.giphy.com/v1/gifs/trending?api_key=${apiKey}&limit=12&rating=g`
 
         const res = await fetch(url)
         const data = await res.json()
-        setGifs(data.data.map((g: any) => g.images.fixed_height_small.url))
+
+        if (data.data) {
+          setGifs(data.data.map((g: any) => g.images.fixed_height_small.url))
+        } else {
+          setGifs([])
+        }
       } catch (err) {
-        console.error('Erreur Giphy', err)
+        setGifs([])
       } finally {
         setIsSearchingGifs(false)
       }
@@ -124,8 +133,7 @@ export function Chat({
       JSON.stringify({
         type: 'chat',
         user: username,
-        text: '',
-        imageUrl: url,
+        text: `__IMG__::${url}`,
       }),
     )
     setIsGifOpen(false)
@@ -151,13 +159,12 @@ export function Chat({
           JSON.stringify({
             type: 'chat',
             user: username,
-            text: '',
-            imageUrl: data.publicUrl,
+            text: `__IMG__::${data.publicUrl}`,
           }),
         )
       }
     } catch (err) {
-      console.error('Erreur upload image', err)
+      console.error(err)
     } finally {
       setIsUploadingImage(false)
       e.target.value = ''
@@ -179,6 +186,10 @@ export function Chat({
       <div className="flex-1 space-y-4 overflow-y-auto p-3 md:p-4">
         {messages.map((msg) => {
           const isMe = msg.user === username
+          const isImage = msg.text.startsWith('__IMG__::')
+          const imageUrl = isImage ? msg.text.substring(9) : null
+          const textContent = isImage ? '' : msg.text
+
           return (
             <div
               key={msg.id}
@@ -194,17 +205,17 @@ export function Chat({
                   isMe
                     ? 'rounded-2xl rounded-tr-sm bg-stone-200 text-stone-900 font-medium'
                     : 'rounded-2xl rounded-tl-sm bg-stone-700 text-stone-100'
-                } ${msg.imageUrl && !msg.text ? 'p-1.5' : ''}`}
+                } ${isImage ? 'p-1.5' : ''}`}
               >
-                {msg.imageUrl && (
+                {isImage && imageUrl && (
                   <img
-                    src={msg.imageUrl}
+                    src={imageUrl}
                     alt="Contenu partagé"
-                    className={`max-w-full rounded-xl object-contain ${msg.text ? 'mb-2' : ''}`}
+                    className="max-w-full rounded-xl object-contain"
                     style={{ maxHeight: '250px' }}
                   />
                 )}
-                {msg.text && <span>{msg.text}</span>}
+                {textContent && <span>{textContent}</span>}
               </div>
             </div>
           )
@@ -269,7 +280,7 @@ export function Chat({
               onClick={() => setIsGifOpen(!isGifOpen)}
               className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all md:h-9 md:w-9 ${isGifOpen ? 'bg-stone-700 text-stone-200' : 'text-stone-400 hover:bg-stone-800 hover:text-stone-200'}`}
             >
-              <div className="flex items-center justify-center rounded border-[1.5px] border-current px-[3px] py-[1px] text-[9px] font-bold tracking-wider">
+              <div className="flex items-center justify-center rounded border-[1.5px] border-current px-0.75 py-px text-[9px] font-bold tracking-wider">
                 GIF
               </div>
             </button>
