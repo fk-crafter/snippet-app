@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import usePartySocket from 'partysocket/react'
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase = createClient(supabaseUrl, supabaseKey)
 
 export function AudioPlayer({ roomId }: { roomId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -13,11 +18,9 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
 
   const pendingSyncRef = useRef(false)
   const isDraggingRef = useRef(false)
-  const lastSentProgressRef = useRef(0)
 
   const PARTY_HOST = import.meta.env.VITE_PARTYKIT_HOST || 'localhost:1999'
   const isProd = import.meta.env.PROD
-  const protocol = isProd ? 'https' : 'http'
 
   const socket = usePartySocket({
     host: PARTY_HOST,
@@ -31,10 +34,6 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
         setIsUploading(true)
         setUploadProgress(0)
         setAudioSrc(null)
-      }
-
-      if (data.type === 'audio-upload-progress') {
-        setUploadProgress(data.progress)
       }
 
       if (data.type === 'audio-loaded') {
@@ -101,51 +100,29 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
     if (!file) return
 
     setIsUploading(true)
-    setUploadProgress(0)
-    lastSentProgressRef.current = 0
+    setUploadProgress(25)
     socket.send(JSON.stringify({ type: 'audio-upload-start', name: file.name }))
 
     try {
-      const data = await new Promise<{ url: string }>((resolve, reject) => {
-        const xhr = new XMLHttpRequest()
-        xhr.open('POST', `${protocol}://${PARTY_HOST}/parties/main/${roomId}`)
-        xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name))
+      const uniqueName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`
 
-        xhr.upload.onprogress = (event) => {
-          if (event.lengthComputable) {
-            const percentComplete = Math.round(
-              (event.loaded / event.total) * 100,
-            )
-            setUploadProgress(percentComplete)
+      setUploadProgress(50)
 
-            if (
-              percentComplete >= lastSentProgressRef.current + 5 ||
-              percentComplete === 100
-            ) {
-              lastSentProgressRef.current = percentComplete
-              socket.send(
-                JSON.stringify({
-                  type: 'audio-upload-progress',
-                  progress: percentComplete,
-                }),
-              )
-            }
-          }
-        }
+      const { error } = await supabase.storage
+        .from('audios')
+        .upload(uniqueName, file)
 
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(JSON.parse(xhr.responseText))
-          } else {
-            reject(new Error(xhr.responseText))
-          }
-        }
+      if (error) throw error
 
-        xhr.onerror = () => reject(new Error('Erreur réseau'))
-        xhr.send(file)
-      })
+      setUploadProgress(75)
 
-      setAudioSrc(data.url)
+      const { data: publicUrlData } = supabase.storage
+        .from('audios')
+        .getPublicUrl(uniqueName)
+
+      const url = publicUrlData.publicUrl
+
+      setAudioSrc(url)
       setFileName(file.name)
       setCurrentTime(0)
       setDuration(0)
@@ -158,14 +135,13 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
         JSON.stringify({
           type: 'audio-loaded',
           name: file.name,
-          url: data.url,
+          url: url,
         }),
       )
     } catch (error) {
-      console.error('Erreur upload :', error)
+      console.error(error)
       setIsUploading(false)
       setUploadProgress(null)
-      alert("Erreur lors de l'upload. Regarde la console de ton terminal.")
     } finally {
       e.target.value = ''
     }
@@ -309,7 +285,7 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
             </div>
             <p className="truncate mt-0.5 text-xs text-stone-300">
               {isUploading
-                ? `Synchronisation du fichier... ${uploadProgress !== null ? uploadProgress + '%' : ''}`
+                ? 'Envoi et synchronisation en cours...'
                 : audioSrc
                   ? 'Prêt pour la lecture'
                   : 'En attente...'}
