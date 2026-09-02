@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import usePartySocket from 'partysocket/react'
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabase = createClient(supabaseUrl, supabaseKey)
 
 export function AudioPlayer({ roomId }: { roomId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -9,11 +14,9 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [isUploading, setIsUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null)
 
   const pendingSyncRef = useRef(false)
   const isDraggingRef = useRef(false)
-  const lastSentProgressRef = useRef(0)
 
   const PARTY_HOST = import.meta.env.VITE_PARTYKIT_HOST || 'localhost:1999'
   const isProd = import.meta.env.PROD
@@ -28,12 +31,6 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
       if (data.type === 'audio-upload-start') {
         setFileName(data.name)
         setIsUploading(true)
-        setUploadProgress(0)
-        setAudioSrc(null)
-      }
-
-      if (data.type === 'audio-upload-progress') {
-        setUploadProgress(data.progress)
       }
 
       if (data.type === 'request-audio-state' && audioSrc) {
@@ -52,7 +49,6 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
         setAudioSrc(data.url)
         setFileName(data.name)
         setIsUploading(false)
-        setUploadProgress(null)
         pendingSyncRef.current = true
 
         if (data.syncTime !== undefined) {
@@ -101,7 +97,6 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
         setCurrentTime(0)
         setDuration(0)
         setIsUploading(false)
-        setUploadProgress(null)
         pendingSyncRef.current = false
       }
     },
@@ -119,79 +114,47 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
     }
   }, [socket])
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
     setIsUploading(true)
-    setUploadProgress(0)
-    lastSentProgressRef.current = 0
+    setFileName(file.name)
     socket.send(JSON.stringify({ type: 'audio-upload-start', name: file.name }))
 
-    const uniqueName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+    try {
+      const uniqueName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`
 
-    const xhr = new XMLHttpRequest()
-    xhr.open('POST', `${supabaseUrl}/storage/v1/object/audios/${uniqueName}`)
-    xhr.setRequestHeader('Authorization', `Bearer ${supabaseKey}`)
-    xhr.setRequestHeader('Content-Type', file.type)
+      const { error } = await supabase.storage
+        .from('audios')
+        .upload(uniqueName, file)
 
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        const percentComplete = Math.round((event.loaded / event.total) * 100)
-        setUploadProgress(percentComplete)
+      if (error) throw error
 
-        if (
-          percentComplete >= lastSentProgressRef.current + 2 ||
-          percentComplete === 100
-        ) {
-          lastSentProgressRef.current = percentComplete
-          socket.send(
-            JSON.stringify({
-              type: 'audio-upload-progress',
-              progress: percentComplete,
-            }),
-          )
-        }
-      }
-    }
+      const { data: publicUrlData } = supabase.storage
+        .from('audios')
+        .getPublicUrl(uniqueName)
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const url = `${supabaseUrl}/storage/v1/object/public/audios/${uniqueName}`
+      const url = publicUrlData.publicUrl
 
-        setAudioSrc(url)
-        setFileName(file.name)
-        setCurrentTime(0)
-        setDuration(0)
-        setIsPlaying(false)
-        setIsUploading(false)
-        setUploadProgress(null)
-        pendingSyncRef.current = true
-
-        socket.send(
-          JSON.stringify({
-            type: 'audio-loaded',
-            name: file.name,
-            url: url,
-          }),
-        )
-      } else {
-        console.error('Upload failed')
-        setIsUploading(false)
-        setUploadProgress(null)
-      }
-    }
-
-    xhr.onerror = () => {
-      console.error('Network error during upload')
+      setAudioSrc(url)
       setIsUploading(false)
-      setUploadProgress(null)
-    }
+      pendingSyncRef.current = true
 
-    xhr.send(file)
-    e.target.value = ''
+      socket.send(
+        JSON.stringify({
+          type: 'audio-loaded',
+          name: file.name,
+          url: url,
+        }),
+      )
+    } catch (error) {
+      console.error('Erreur upload Supabase:', error)
+      setIsUploading(false)
+      setFileName(null)
+    } finally {
+      e.target.value = ''
+    }
   }
 
   const handlePlayPause = (shouldPlay: boolean) => {
@@ -332,7 +295,7 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
             </div>
             <p className="truncate mt-0.5 text-xs text-stone-300">
               {isUploading
-                ? `Upload en cours... ${uploadProgress !== null ? uploadProgress + '%' : ''}`
+                ? "Envoie de l'audio en cours..."
                 : audioSrc
                   ? 'Prêt pour la lecture'
                   : 'En attente...'}
@@ -396,15 +359,6 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
           onPause={() => setIsPlaying(false)}
           onEnded={() => setIsPlaying(false)}
         />
-      )}
-
-      {uploadProgress !== null && (
-        <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-stone-700">
-          <div
-            className="h-full bg-stone-200 transition-all duration-300"
-            style={{ width: `${uploadProgress}%` }}
-          ></div>
-        </div>
       )}
     </div>
   )
