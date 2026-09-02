@@ -1,10 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import usePartySocket from 'partysocket/react'
-import { createClient } from '@supabase/supabase-js'
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-const supabase = createClient(supabaseUrl, supabaseKey)
 
 export function AudioPlayer({ roomId }: { roomId: string }) {
   const audioRef = useRef<HTMLAudioElement>(null)
@@ -18,6 +13,7 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
 
   const pendingSyncRef = useRef(false)
   const isDraggingRef = useRef(false)
+  const lastSentProgressRef = useRef(0)
 
   const PARTY_HOST = import.meta.env.VITE_PARTYKIT_HOST || 'localhost:1999'
   const isProd = import.meta.env.PROD
@@ -36,15 +32,43 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
         setAudioSrc(null)
       }
 
+      if (data.type === 'audio-upload-progress') {
+        setUploadProgress(data.progress)
+      }
+
+      if (data.type === 'request-audio-state' && audioSrc) {
+        socket.send(
+          JSON.stringify({
+            type: 'audio-loaded',
+            name: fileName,
+            url: audioSrc,
+            syncTime: audioRef.current?.currentTime || 0,
+            syncPlaying: !audioRef.current?.paused,
+          }),
+        )
+      }
+
       if (data.type === 'audio-loaded') {
         setAudioSrc(data.url)
         setFileName(data.name)
-        setCurrentTime(0)
-        setDuration(0)
-        setIsPlaying(false)
         setIsUploading(false)
         setUploadProgress(null)
         pendingSyncRef.current = true
+
+        if (data.syncTime !== undefined) {
+          setCurrentTime(data.syncTime)
+          if (audioRef.current) {
+            audioRef.current.currentTime = data.syncTime
+            if (data.syncPlaying) {
+              audioRef.current.play().catch(() => {})
+              setIsPlaying(true)
+            }
+          }
+        } else {
+          setCurrentTime(0)
+          setDuration(0)
+          setIsPlaying(false)
+        }
       }
 
       if (data.type === 'audio-action' && audioRef.current) {
@@ -95,56 +119,79 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
     }
   }, [socket])
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
 
     setIsUploading(true)
-    setUploadProgress(25)
+    setUploadProgress(0)
+    lastSentProgressRef.current = 0
     socket.send(JSON.stringify({ type: 'audio-upload-start', name: file.name }))
 
-    try {
-      const uniqueName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`
+    const uniqueName = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+    const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-      setUploadProgress(50)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${supabaseUrl}/storage/v1/object/audios/${uniqueName}`)
+    xhr.setRequestHeader('Authorization', `Bearer ${supabaseKey}`)
+    xhr.setRequestHeader('Content-Type', file.type)
 
-      const { error } = await supabase.storage
-        .from('audios')
-        .upload(uniqueName, file)
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        const percentComplete = Math.round((event.loaded / event.total) * 100)
+        setUploadProgress(percentComplete)
 
-      if (error) throw error
-
-      setUploadProgress(75)
-
-      const { data: publicUrlData } = supabase.storage
-        .from('audios')
-        .getPublicUrl(uniqueName)
-
-      const url = publicUrlData.publicUrl
-
-      setAudioSrc(url)
-      setFileName(file.name)
-      setCurrentTime(0)
-      setDuration(0)
-      setIsPlaying(false)
-      setIsUploading(false)
-      setUploadProgress(null)
-      pendingSyncRef.current = true
-
-      socket.send(
-        JSON.stringify({
-          type: 'audio-loaded',
-          name: file.name,
-          url: url,
-        }),
-      )
-    } catch (error) {
-      console.error(error)
-      setIsUploading(false)
-      setUploadProgress(null)
-    } finally {
-      e.target.value = ''
+        if (
+          percentComplete >= lastSentProgressRef.current + 2 ||
+          percentComplete === 100
+        ) {
+          lastSentProgressRef.current = percentComplete
+          socket.send(
+            JSON.stringify({
+              type: 'audio-upload-progress',
+              progress: percentComplete,
+            }),
+          )
+        }
+      }
     }
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const url = `${supabaseUrl}/storage/v1/object/public/audios/${uniqueName}`
+
+        setAudioSrc(url)
+        setFileName(file.name)
+        setCurrentTime(0)
+        setDuration(0)
+        setIsPlaying(false)
+        setIsUploading(false)
+        setUploadProgress(null)
+        pendingSyncRef.current = true
+
+        socket.send(
+          JSON.stringify({
+            type: 'audio-loaded',
+            name: file.name,
+            url: url,
+          }),
+        )
+      } else {
+        console.error('Upload failed')
+        setIsUploading(false)
+        setUploadProgress(null)
+      }
+    }
+
+    xhr.onerror = () => {
+      console.error('Network error during upload')
+      setIsUploading(false)
+      setUploadProgress(null)
+    }
+
+    xhr.send(file)
+    e.target.value = ''
   }
 
   const handlePlayPause = (shouldPlay: boolean) => {
@@ -285,7 +332,7 @@ export function AudioPlayer({ roomId }: { roomId: string }) {
             </div>
             <p className="truncate mt-0.5 text-xs text-stone-300">
               {isUploading
-                ? 'Envoi et synchronisation en cours...'
+                ? `Upload en cours... ${uploadProgress !== null ? uploadProgress + '%' : ''}`
                 : audioSrc
                   ? 'Prêt pour la lecture'
                   : 'En attente...'}
