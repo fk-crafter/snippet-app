@@ -129,30 +129,6 @@ export default class AudioSyncServer implements Party.Server {
           messages: this.chatHistory,
         }),
       )
-
-      if (this.audioState.url) {
-        sender.send(
-          JSON.stringify({
-            type: 'audio-loaded',
-            url: this.audioState.url,
-            name: this.audioState.name,
-          }),
-        )
-
-        let currentSyncTime = this.audioState.currentTime
-        if (this.audioState.isPlaying) {
-          currentSyncTime +=
-            (Date.now() - this.audioState.lastUpdateTime) / 1000
-        }
-
-        sender.send(
-          JSON.stringify({
-            type: 'audio-action',
-            action: this.audioState.isPlaying ? 'play' : 'pause',
-            time: currentSyncTime,
-          }),
-        )
-      }
     } else if (data.type === 'chat') {
       const chatMsg: ChatMessage = {
         id: crypto.randomUUID(),
@@ -209,6 +185,16 @@ export default class AudioSyncServer implements Party.Server {
           time: currentSyncTime,
         }),
       )
+    } else if (data.type === 'request-audio-state') {
+      if (this.audioState.url) {
+        sender.send(
+          JSON.stringify({
+            type: 'audio-loaded',
+            url: this.audioState.url,
+            name: this.audioState.name,
+          })
+        )
+      }
     }
   }
 }
